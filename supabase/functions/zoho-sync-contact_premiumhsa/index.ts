@@ -173,6 +173,38 @@ function normalizeSsn(ssn: string): string {
   return ssn.replace(/\D/g, "").slice(0, 9);
 }
 
+/**
+ * Client encrypts sensitive fields and replaces them on the wire with the literal
+ * string `[encrypted]` (see `EnrollmentWizard.tsx` -> syncToZoho). Treat that
+ * marker as an empty value so it never leaks into Zoho typed fields when an
+ * optional dependent field (e.g. minor-child Email) is legitimately blank.
+ * Both casings handled defensively in case a sibling repo uses `[ENCRYPTED]`.
+ */
+function stripEncryptedPlaceholder(value: string | undefined | null): string {
+  if (value == null) return "";
+  const trimmed = String(value).trim();
+  if (trimmed === "[encrypted]" || trimmed === "[ENCRYPTED]") return "";
+  return trimmed;
+}
+
+/**
+ * Resolves a per-dependent encrypted field. Prefers the decrypted array even
+ * when the value at that index is empty — that empty value intentionally
+ * overwrites the client `[encrypted]` placeholder for optional fields like a
+ * minor child's Email/Phone/SSN. Falls back to the client payload only when the
+ * decrypted array is absent or shorter than `idx` (e.g. encryption disabled).
+ */
+function resolveDependentField(
+  decryptedArr: string[] | undefined,
+  idx: number,
+  clientFallback: string | undefined
+): string {
+  if (Array.isArray(decryptedArr) && idx < decryptedArr.length) {
+    return decryptedArr[idx] ?? "";
+  }
+  return stripEncryptedPlaceholder(clientFallback);
+}
+
 function convertDateToZoho(dateStr: string): string {
   if (!dateStr) return "";
   if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
@@ -315,17 +347,22 @@ function buildZohoContactPayload(
   decrypted: DecryptedClientData,
   ownerName?: string
 ): Record<string, unknown> {
+  const primaryEmail = decrypted.email || stripEncryptedPlaceholder(payload.email);
+  const primaryPhone = normalizePhone(decrypted.phone || stripEncryptedPlaceholder(payload.phone));
+  const primaryDob = convertDateToZoho(decrypted.dob || stripEncryptedPlaceholder(payload.dob));
+  const primarySsn = normalizeSsn(decrypted.ssn || stripEncryptedPlaceholder(payload.ssn));
+
   const contact: Record<string, unknown> = {
     First_Name: payload.firstName,
     Last_Name: payload.lastName,
-    Email: decrypted.email || payload.email,
-    Phone: normalizePhone(decrypted.phone || payload.phone),
-    Date_of_Birth: convertDateToZoho(decrypted.dob || payload.dob),
+    Email: primaryEmail,
+    Phone: primaryPhone,
+    Date_of_Birth: primaryDob,
     Mailing_Street: payload.address1,
     Mailing_City: payload.city,
     Mailing_State: payload.state,
     Mailing_Zip: payload.zipcode,
-    Social_Security_Number: normalizeSsn(decrypted.ssn || payload.ssn),
+    Social_Security_Number: primarySsn,
     Primary_Member: payload.gender,
     Start_Date: convertDateToZoho(payload.effectiveDate),
     Monthly_Premium: payload.selectedPrice,
@@ -346,29 +383,41 @@ function buildZohoContactPayload(
   let childIndex = 1;
 
   dependents.forEach((dep, idx) => {
-    const depSsn = decrypted.dependentSsns?.[idx] || dep.ssn || "";
-    const depPhone = decrypted.dependentPhones?.[idx] || dep.phone || "";
-    const depEmail = decrypted.dependentEmails?.[idx] || dep.email || "";
-    const depDob = decrypted.dependentDobs?.[idx] || dep.dob || "";
+    const depSsn = resolveDependentField(decrypted.dependentSsns, idx, dep.ssn);
+    const depPhone = resolveDependentField(decrypted.dependentPhones, idx, dep.phone);
+    const depEmail = resolveDependentField(decrypted.dependentEmails, idx, dep.email);
+    const depDob = resolveDependentField(decrypted.dependentDobs, idx, dep.dob);
 
     const depAddress = dep.useSameAddress
       ? buildFullAddress(payload.address1, payload.city, payload.state, payload.zipcode)
       : buildFullAddress(dep.address, dep.city, dep.state, dep.zipcode);
 
+    // Email/Phone/SSN are optional for child dependents under 18 (and defensively
+    // handled the same way for spouses). Zoho rejects empty strings on typed
+    // fields (e.g. INVALID_DATA on Email/Date), so omit the key entirely when
+    // there's no usable value rather than sending "" or the [encrypted] marker.
     if (dep.relationship === "Spouse") {
       contact.Spouse = `${dep.firstName} ${dep.lastName}`;
-      contact.Spouse_DOB = convertDateToZoho(depDob);
-      contact.Spouse_Email = depEmail;
-      contact.Spouse_Phone_Number = normalizePhone(depPhone);
-      contact.Spouse_Social_Security = normalizeSsn(depSsn);
-      contact.Spouse_Address = depAddress;
+      const spouseDob = convertDateToZoho(depDob);
+      if (spouseDob) contact.Spouse_DOB = spouseDob;
+      const spouseEmail = stripEncryptedPlaceholder(depEmail);
+      if (spouseEmail) contact.Spouse_Email = spouseEmail;
+      const spousePhone = normalizePhone(depPhone);
+      if (spousePhone) contact.Spouse_Phone_Number = spousePhone;
+      const spouseSsn = normalizeSsn(depSsn);
+      if (spouseSsn) contact.Spouse_Social_Security = spouseSsn;
+      if (depAddress) contact.Spouse_Address = depAddress;
     } else if (dep.relationship === "Child") {
       contact[`Child_${childIndex}`] = `${dep.firstName} ${dep.lastName}`;
-      contact[`Child_${childIndex}_DOB`] = convertDateToZoho(depDob);
-      contact[`Child_${childIndex}_Email`] = depEmail;
-      contact[`Child_${childIndex}_Phone_Number`] = normalizePhone(depPhone);
-      contact[`Child_${childIndex}_S_S_Number`] = normalizeSsn(depSsn);
-      contact[`Child_${childIndex}_Address`] = depAddress;
+      const childDob = convertDateToZoho(depDob);
+      if (childDob) contact[`Child_${childIndex}_DOB`] = childDob;
+      const childEmail = stripEncryptedPlaceholder(depEmail);
+      if (childEmail) contact[`Child_${childIndex}_Email`] = childEmail;
+      const childPhone = normalizePhone(depPhone);
+      if (childPhone) contact[`Child_${childIndex}_Phone_Number`] = childPhone;
+      const childSsn = normalizeSsn(depSsn);
+      if (childSsn) contact[`Child_${childIndex}_S_S_Number`] = childSsn;
+      if (depAddress) contact[`Child_${childIndex}_Address`] = depAddress;
       childIndex++;
     }
   });
