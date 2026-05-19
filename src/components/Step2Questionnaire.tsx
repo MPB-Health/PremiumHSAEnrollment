@@ -515,7 +515,7 @@ export default function Step2Questionnaire({
                   onChange={(e) => handleRadioChange('primaryMemberConditionsPast36Mo', e.target.value)}
                   className="w-4 h-4 text-blue-600"
                 />
-                <span className="text-sm text-gray-700">Yes</span>
+                <span className="text-sm text-gray-700">YES</span>
               </label>
               <label className="flex items-center gap-2 cursor-pointer">
                 <input
@@ -526,7 +526,7 @@ export default function Step2Questionnaire({
                   onChange={(e) => handleRadioChange('primaryMemberConditionsPast36Mo', e.target.value)}
                   className="w-4 h-4 text-blue-600"
                 />
-                <span className="text-sm text-gray-700">No</span>
+                <span className="text-sm text-gray-700">NO</span>
               </label>
             </div>
             {errors.primaryMemberConditionsPast36Mo && (
@@ -534,7 +534,7 @@ export default function Step2Questionnaire({
             )}
 
             <p className="text-sm text-gray-700 pt-2">
-              If you have any pre-existing conditions or answered &quot;Yes&quot; to health history questions, please provide:
+              If you have any pre-existing conditions or answered &quot;YES&quot; to health history questions, please provide:
             </p>
             <ul className="list-disc list-inside space-y-1 text-sm text-gray-700">
               <li>Date of treatment</li>
