@@ -22,29 +22,35 @@ export default function PreExistingConditionsSection({
         <div className="prose prose-sm max-w-none">
           <p className="text-gray-800 leading-relaxed mb-4">
             Any pre-existing medical condition whether diagnosed or not, that has been active or needed treatment within 36 months
-            prior to a Member&apos;s membership start date is subject to sharing limitations.
-          </p>
-          <p className="text-gray-800 leading-relaxed mb-4">
-            Pre-existing conditions will become eligible for sharing based on the Member&apos;s tenure with the Sedera Medical Cost
-            Sharing Community, as indicated by the following graduated sharing schedule.
+            prior to a Member&apos;s membership start date is subject to sharing limitations. Pre-existing conditions will become
+            eligible for sharing based on the Member&apos;s tenure with the Sedera Medical Cost Sharing Community, as indicated by
+            the following graduated sharing schedule.
           </p>
 
           <ul className="space-y-2 text-gray-700 list-none pl-0">
             <li className="flex items-start gap-2">
               <span className="font-semibold text-blue-700 mt-0.5">•</span>
-              <span>First 12 months – Not shareable.</span>
+              <span>
+                <strong className="text-gray-900">First 12 months</strong> – Not shareable.
+              </span>
             </li>
             <li className="flex items-start gap-2">
               <span className="font-semibold text-blue-700 mt-0.5">•</span>
-              <span>Months 13-24 – Shareable up to $25,000.</span>
+              <span>
+                <strong className="text-gray-900">Months 13-24</strong> – Shareable up to $25,000.
+              </span>
             </li>
             <li className="flex items-start gap-2">
               <span className="font-semibold text-blue-700 mt-0.5">•</span>
-              <span>Months 25-36 – Shareable up to $50,000.</span>
+              <span>
+                <strong className="text-gray-900">Months 25-36</strong> – Shareable up to $50,000.
+              </span>
             </li>
             <li className="flex items-start gap-2">
               <span className="font-semibold text-blue-700 mt-0.5">•</span>
-              <span>Months 37 and after – shareable.</span>
+              <span>
+                <strong className="text-gray-900">Months 37 and after</strong> – shareable.
+              </span>
             </li>
           </ul>
         </div>
