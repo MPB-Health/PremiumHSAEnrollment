@@ -2,6 +2,11 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { FormData } from '../hooks/useEnrollmentStorage';
 import { TERMS_AND_CONDITIONS_PARAGRAPHS } from '../constants/termsAndConditionsEnrollment';
+import {
+  PRE_EXISTING_CONDITIONS_INTRO,
+  PRE_EXISTING_CONDITIONS_SCHEDULE_LINES,
+  PRE_EXISTING_CONDITIONS_TITLE,
+} from '../constants/preExistingConditionsCopy';
 import { TOBACCO_USE_MONTHLY_FEE } from './pricingLogic';
 import { maskSSN, maskCardNumber, maskRoutingNumber, maskAccountNumber } from './masking';
 
@@ -363,7 +368,7 @@ export async function generateEnrollmentPDF(formData: FormData): Promise<Blob> {
     ['Membership Principles — Dispute Resolution & Responsibility', formatAnswer(q.zionm1b)],
     ['Membership Principles — Acknowledgements & State Notices', formatAnswer(q.zionm1d)],
     [
-      'Health History — I understand (accurate info for household; pre-existing waiting/limitations; 36 months symptom/treatment/medication free; undisclosed treated as disclosed at start)',
+      'Health History — Accurate disclosure for household; undisclosed conditions treated as disclosed at membership start. Pre-existing sharing limitations are stated under Limitations on Pre-Existing Conditions below.',
       formatAnswer(q.zionmh2P),
     ],
     [
@@ -414,6 +419,60 @@ export async function generateEnrollmentPDF(formData: FormData): Promise<Blob> {
     doc.addPage();
     yPosition = 20;
   }
+
+  const bottomMarginPdf = 22;
+  doc.setFontSize(14);
+  doc.setFont('helvetica', 'bold');
+  doc.text(PRE_EXISTING_CONDITIONS_TITLE, 14, yPosition);
+  yPosition += 8;
+
+  doc.setFontSize(10);
+  doc.setFont('helvetica', 'normal');
+  const preIntroLines = doc.splitTextToSize(PRE_EXISTING_CONDITIONS_INTRO, pageWidth - 28);
+  for (const line of preIntroLines) {
+    if (yPosition > pageHeight - bottomMarginPdf) {
+      doc.addPage();
+      yPosition = 20;
+    }
+    doc.text(line, 14, yPosition);
+    yPosition += 4.5;
+  }
+  yPosition += 4;
+
+  for (const scheduleLine of PRE_EXISTING_CONDITIONS_SCHEDULE_LINES) {
+    const lineHeight = 5;
+    if (yPosition > pageHeight - bottomMarginPdf - lineHeight - 8) {
+      doc.addPage();
+      yPosition = 20;
+    }
+    doc.setFontSize(10);
+    doc.text('•', 16, yPosition);
+    const textBaseX = 22;
+    doc.setFont('helvetica', 'bold');
+    const emphW = doc.getTextWidth(scheduleLine.emphasis);
+    doc.text(scheduleLine.emphasis, textBaseX, yPosition);
+    doc.setFont('helvetica', 'normal');
+    doc.text(scheduleLine.rest, textBaseX + emphW, yPosition);
+    yPosition += lineHeight + 1;
+  }
+
+  yPosition += 6;
+  if (yPosition > pageHeight - bottomMarginPdf - 24) {
+    doc.addPage();
+    yPosition = 20;
+  }
+  doc.setFontSize(10);
+  doc.setFont('helvetica', 'bold');
+  doc.text('Do you acknowledge and agree to these terms?', 14, yPosition);
+  yPosition += 6;
+  doc.setFont('helvetica', 'normal');
+  {
+    const preAck = formData.preExistingConditionsAcknowledged?.trim();
+    const preAckPdf =
+      preAck?.toLowerCase() === 'yes' ? 'YES' : preAck?.toLowerCase() === 'no' ? 'NO' : preAck || 'N/A';
+    doc.text(preAckPdf, 14, yPosition);
+  }
+  yPosition += 14;
 
   if (yPosition > pageHeight - 40) {
     doc.addPage();
