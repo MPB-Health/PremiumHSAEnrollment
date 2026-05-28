@@ -228,7 +228,7 @@ export async function generateEnrollmentPDF(formData: FormData): Promise<Blob> {
     : 100;
 
   const enrollmentFeeText = formData.appliedPromo?.discountAmount
-    ? `$${enrollmentFeeAmount.toFixed(2)} one-time discount applied`
+    ? `$${enrollmentFeeAmount.toFixed(2)} one-time (enrollment code discount applied)`
     : '$100.00 one-time';
 
   const enrollmentFeesInfo = [
