@@ -15,6 +15,11 @@ import {
   PREMIUM_HSA_UNAVAILABLE_STATE_MESSAGE,
 } from '../utils/premiumHsaUnavailableStates';
 import { isChildDependentUnder18ForContactOptional } from '../utils/dependentAgeValidation';
+import {
+  getOrCreateSubmissionId,
+  clearSubmissionId,
+  fetchSubmissionStatus,
+} from '../utils/enrollmentSubmission';
 import ProgressIndicator from './ProgressIndicator';
 import Step1PersonalInfo from './Step1PersonalInfo';
 import Step2Questionnaire from './Step2Questionnaire';
@@ -41,6 +46,7 @@ export default function EnrollmentWizard({ benefitId, onBenefitIdChange, agentId
     useEnrollmentStorage(benefitId, agentId);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
+  const [finishingEnrollment, setFinishingEnrollment] = useState(false);
   const [response, setResponse] = useState<ApiResponse | null>(null);
   const [showThankYou, setShowThankYou] = useState(false);
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
@@ -710,6 +716,26 @@ export default function EnrollmentWizard({ benefitId, onBenefitIdChange, agentId
       const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
       const agentParam = formData.agent || agentId || '768413';
       const apiUrl = `${supabaseUrl}/functions/v1/enrollment-api-premiumhsa?id=${agentParam}`;
+      const submissionId = getOrCreateSubmissionId();
+
+      // Runs the PDF + gateway phase once a member exists (shared by the normal
+      // success path and the 409 / idempotent-replay recovery path).
+      const finishEnrollment = async (resolvedMemberId: string | null) => {
+        setMemberId(resolvedMemberId);
+        setFinishingEnrollment(true);
+        try {
+          await generateAndUploadPDF(resolvedMemberId, submissionId);
+        } catch {
+          // Intentionally swallow: never block the success UI on a storage/gateway
+          // failure. The background cron completes any stuck gateway attach.
+        }
+        clearSubmissionId();
+        setShowThankYou(true);
+        clearStorage();
+        setFinishingEnrollment(false);
+        setLoading(false);
+        sendAdvisorNotification(agentParam).catch(() => {});
+      };
 
       const secureHsaProduct = formData.products.find(p => p.id === 'secure-hsa');
       const benefitIdToSend = secureHsaProduct?.extractedBenefitId || formData.benefitId;
@@ -784,10 +810,36 @@ export default function EnrollmentWizard({ benefitId, onBenefitIdChange, agentId
               'Content-Type': 'application/json',
               'apikey': supabaseKey,
               'Cache-Control': 'no-cache, no-store',
+              'X-Submission-Id': submissionId,
             },
             cache: 'no-store',
             body: bodyString,
           });
+
+          // Parallel/duplicate submit guard: the member API was (or is being)
+          // called for this submission. Recover the member id and resume the
+          // PDF/gateway phase instead of re-POSTing (which would 409 again).
+          if (res.status === 409) {
+            const statusResult = await fetchSubmissionStatus(submissionId, agentParam);
+            if (statusResult.success && statusResult.memberId) {
+              await finishEnrollment(statusResult.memberId);
+              return;
+            }
+            if (attempt < maxRetries - 1) {
+              attempt++;
+              const delay = Math.min(1000 * Math.pow(2, attempt), 5000);
+              await new Promise(resolve => setTimeout(resolve, delay));
+              continue;
+            }
+            setResponse({
+              success: false,
+              status: 409,
+              error: 'Enrollment already in progress',
+              message: 'Your enrollment is being processed. Please wait a moment before trying again.',
+            });
+            setLoading(false);
+            return;
+          }
 
           const contentType = res.headers.get('content-type');
           if (!contentType || !contentType.includes('application/json')) {
@@ -810,9 +862,11 @@ export default function EnrollmentWizard({ benefitId, onBenefitIdChange, agentId
               data.success === true &&
               data.data?.SUCCESS === "true";
 
-            // MEC variant retention guard: PDF is uploaded only when this is true.
+            // An idempotent replay (member already created for this submission)
+            // is also a success — its data carries MEMBER.ID / TRANSACTION.SUCCESS.
             const enrollmentSuccess =
-              (transactionSuccess || hasSuccessFlag) && !transactionFailed;
+              (transactionSuccess || hasSuccessFlag || data.idempotentReplay === true) &&
+              !transactionFailed;
 
             if (!enrollmentSuccess) {
               setResponse(data);
@@ -822,19 +876,7 @@ export default function EnrollmentWizard({ benefitId, onBenefitIdChange, agentId
             }
 
             const extractedMemberId = data.data?.MEMBER?.ID?.toString() || null;
-            setMemberId(extractedMemberId);
-
-            try {
-              await generateAndUploadPDF(extractedMemberId);
-            } catch {
-              // Intentionally swallow: never block the success UI on a storage failure.
-            }
-
-            setShowThankYou(true);
-            clearStorage();
-            setLoading(false);
-
-            sendAdvisorNotification(agentParam).catch(() => {});
+            await finishEnrollment(extractedMemberId);
             return;
           }
 
@@ -990,7 +1032,7 @@ export default function EnrollmentWizard({ benefitId, onBenefitIdChange, agentId
     }
   };
 
-  const sendPdfToGateway = async (memberId: string, pdfUrl: string) => {
+  const sendPdfToGateway = async (memberId: string, pdfUrl: string, submissionId?: string) => {
     try {
       const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
       const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
@@ -1010,6 +1052,7 @@ export default function EnrollmentWizard({ benefitId, onBenefitIdChange, agentId
           memberId,
           pdfUrl,
           customerEmail: formData.email,
+          ...(submissionId ? { submissionId } : {}),
         }),
       });
 
@@ -1030,7 +1073,7 @@ export default function EnrollmentWizard({ benefitId, onBenefitIdChange, agentId
     }
   };
 
-  const generateAndUploadPDF = async (enrollmentMemberId: string | null) => {
+  const generateAndUploadPDF = async (enrollmentMemberId: string | null, submissionId?: string) => {
     try {
       const pdfBlob = await generateEnrollmentPDF(formData);
 
@@ -1042,6 +1085,9 @@ export default function EnrollmentWizard({ benefitId, onBenefitIdChange, agentId
       const formDataUpload = new FormData();
       formDataUpload.append('pdf', pdfBlob, 'enrollment.pdf');
       formDataUpload.append('email', formData.email);
+      if (submissionId) {
+        formDataUpload.append('submissionId', submissionId);
+      }
       formDataUpload.append('metadata', JSON.stringify({
         firstName: formData.firstName,
         lastName: formData.lastName,
@@ -1073,7 +1119,7 @@ export default function EnrollmentWizard({ benefitId, onBenefitIdChange, agentId
         setPdfUrl(pdfResult.pdfUrl);
 
         if (enrollmentMemberId) {
-          await sendPdfToGateway(enrollmentMemberId, pdfResult.pdfUrl);
+          await sendPdfToGateway(enrollmentMemberId, pdfResult.pdfUrl, submissionId);
         }
       } else {
         throw new Error(pdfResult.error || 'PDF upload failed');
@@ -1141,6 +1187,7 @@ export default function EnrollmentWizard({ benefitId, onBenefitIdChange, agentId
               onClearError={handleClearError}
               invalidDependentIndices={invalidDependentIndices}
               employeeGroup={employeeGroup}
+              finishingEnrollment={finishingEnrollment}
             />
           )}
         </form>

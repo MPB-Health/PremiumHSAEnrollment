@@ -1,9 +1,15 @@
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4';
+import {
+  isValidSubmissionId,
+  loadSubmission,
+  markSubmissionPdfStored,
+} from '../_shared/enrollmentSubmissions.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Client-Info, Apikey, Cache-Control',
+  'Access-Control-Allow-Headers':
+    'Content-Type, Authorization, X-Client-Info, Apikey, Cache-Control, X-Submission-Id',
 };
 
 function sanitizeEmail(email: string): string {
@@ -33,6 +39,8 @@ Deno.serve(async (req: Request) => {
     const pdfFile = formData.get('pdf') as File;
     const customerEmail = formData.get('email') as string;
     const metadata = formData.get('metadata') as string;
+    const submissionIdRaw = (formData.get('submissionId') as string | null)?.trim() ?? '';
+    const submissionId = isValidSubmissionId(submissionIdRaw) ? submissionIdRaw : null;
 
     if (!pdfFile || !customerEmail) {
       return new Response(
@@ -45,6 +53,29 @@ Deno.serve(async (req: Request) => {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         }
       );
+    }
+
+    if (submissionId) {
+      const existing = await loadSubmission(supabase, submissionId);
+      if (
+        existing &&
+        existing.pdf_url &&
+        ['pdf_stored', 'pdf_attached', 'completed'].includes(existing.status)
+      ) {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            pdfUrl: existing.pdf_url,
+            storagePath: existing.storage_path,
+            filename: `${sanitizeEmail(customerEmail)}.pdf`,
+            idempotentReplay: true,
+          }),
+          {
+            status: 200,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          }
+        );
+      }
     }
 
     const pdfBuffer = await pdfFile.arrayBuffer();
@@ -68,7 +99,7 @@ Deno.serve(async (req: Request) => {
     const filename = `${sanitizedFilename}.pdf`;
     const storagePath = `enrollments/${filename}`;
 
-    const { data: uploadData, error: uploadError } = await supabase.storage
+    const { error: uploadError } = await supabase.storage
       .from('enrollment-documents')
       .upload(storagePath, pdfBuffer, {
         contentType: 'application/pdf',
@@ -96,7 +127,7 @@ Deno.serve(async (req: Request) => {
     const pdfUrl = urlData.publicUrl;
 
     const parsedMetadata = metadata ? JSON.parse(metadata) : {};
-    const { error: dbError } = await supabase
+    await supabase
       .from('enrollment_pdfs')
       .upsert({
         customer_email: customerEmail,
@@ -108,8 +139,8 @@ Deno.serve(async (req: Request) => {
         onConflict: 'customer_email'
       });
 
-    if (dbError) {
-      // Database insert error handled silently
+    if (submissionId) {
+      await markSubmissionPdfStored(supabase, submissionId, pdfUrl, storagePath);
     }
 
     return new Response(

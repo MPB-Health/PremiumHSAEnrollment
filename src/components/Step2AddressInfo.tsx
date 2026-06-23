@@ -38,6 +38,7 @@ interface Step2AddressInfoProps {
   onClearError?: (field: string) => void;
   invalidDependentIndices?: number[];
   employeeGroup?: string | null;
+  finishingEnrollment?: boolean;
 }
 
 export default function Step2AddressInfo({
@@ -53,6 +54,7 @@ export default function Step2AddressInfo({
   onClearError,
   invalidDependentIndices = [],
   employeeGroup = null,
+  finishingEnrollment = false,
 }: Step2AddressInfoProps) {
   const [showReview, setShowReview] = useState(true);
   const [showSSN, setShowSSN] = useState(false);
@@ -549,10 +551,15 @@ export default function Step2AddressInfo({
             <button
               type="button"
               onClick={onSubmit}
-              disabled={loading || primaryStateUnavailable}
+              disabled={loading || finishingEnrollment || primaryStateUnavailable}
               className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg transition duration-200 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {loading ? (
+              {finishingEnrollment ? (
+                <>
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                  Finishing enrollment…
+                </>
+              ) : loading ? (
                 <>
                   <Loader2 className="w-5 h-5 animate-spin" />
                   Processing...

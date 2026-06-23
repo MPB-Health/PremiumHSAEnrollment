@@ -1,11 +1,14 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4';
 import CryptoJS from "npm:crypto-js@4.2.0";
+import { attachPdfToGateway } from "../_shared/gatewayAttach.ts";
+import { isValidSubmissionId, loadSubmission } from "../_shared/enrollmentSubmissions.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey, Cache-Control",
+  "Access-Control-Allow-Headers":
+    "Content-Type, Authorization, X-Client-Info, Apikey, Cache-Control, X-Submission-Id",
 };
 
 function decryptPassword(encryptedPassword: string): string {
@@ -34,6 +37,7 @@ interface GatewayRequest {
    * gateway send (no deletion is performed here).
    */
   customerEmail?: string;
+  submissionId?: string;
 }
 
 Deno.serve(async (req: Request) => {
@@ -158,48 +162,44 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    const formData = new URLSearchParams();
-    formData.append("CORP_ID", "1402");
-    formData.append("API_USERNAME", username);
-    formData.append("API_PASSWORD", password);
-    formData.append("AGENT_ID", agentNumber.toString());
+    const submissionId = isValidSubmissionId(requestData.submissionId)
+      ? requestData.submissionId!.trim()
+      : null;
 
-    const hasMemberData = requestData.memberId && requestData.pdfUrl;
-    if (hasMemberData) {
-      formData.append("DOC_TYPE", "Signature");
-      formData.append("DOC_DESCRIPTION", "Signature");
-      formData.append("DOC_PROCESSOR", "Internal");
-      formData.append("DOC_FILEURL", requestData.pdfUrl);
-      formData.append("UNIQUE_ID", requestData.memberId);
+    // If this submission's PDF was already attached/completed, replay success
+    // instead of attaching the document a second time.
+    if (submissionId) {
+      const existing = await loadSubmission(supabase, submissionId);
+      if (existing && ['pdf_attached', 'completed'].includes(existing.status)) {
+        return new Response(
+          JSON.stringify({ success: true, status: 200, data: { idempotentReplay: true } }),
+          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
     }
 
-    const gatewayApiUrl = "https://enrollment123.com/gateway/member.cfm";
-
-    const response = await fetch(gatewayApiUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: formData.toString(),
+    const attachResult = await attachPdfToGateway({
+      supabase,
+      agentNumber,
+      username,
+      password,
+      memberId: requestData.memberId,
+      pdfUrl: requestData.pdfUrl,
+      submissionId,
     });
 
-    const responseText = await response.text();
-    let responseData;
-
-    try {
-      responseData = JSON.parse(responseText);
-    } catch {
-      responseData = responseText;
-    }
+    // NOTE: Premium HSA intentionally RETAINS the stored PDF after a successful
+    // gateway attach (no storage deletion / metadata flagging here). The
+    // submission status update is handled inside attachPdfToGateway.
 
     return new Response(
       JSON.stringify({
-        success: response.ok,
-        status: response.status,
-        data: responseData,
+        success: attachResult.success,
+        status: attachResult.status,
+        data: attachResult.data,
       }),
       {
-        status: response.ok ? 200 : response.status,
+        status: attachResult.success ? 200 : attachResult.status,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       }
     );

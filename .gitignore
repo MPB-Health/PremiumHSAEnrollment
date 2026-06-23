@@ -24,3 +24,6 @@ dist-ssr
 
 # Supabase CLI local cache
 supabase/.temp/
+
+# Cursor IDE local config (MCP, agent transcripts, etc.)
+.cursor/
