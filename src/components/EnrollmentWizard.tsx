@@ -718,16 +718,21 @@ export default function EnrollmentWizard({ benefitId, onBenefitIdChange, agentId
       const apiUrl = `${supabaseUrl}/functions/v1/enrollment-api-premiumhsa?id=${agentParam}`;
       const submissionId = getOrCreateSubmissionId();
 
-      // Runs the PDF + gateway phase once a member exists (shared by the normal
-      // success path and the 409 / idempotent-replay recovery path).
+      // Generates the PDF and uploads it to Supabase storage once a member
+      // exists (shared by the normal success path and the 409 / idempotent-replay
+      // recovery path). The gateway attach is intentionally NOT done here — the
+      // PDF is uploaded to 1Administration manually to guarantee no duplicate
+      // enrollment. submissionId is deliberately NOT forwarded to the PDF upload
+      // so the row is never marked `pdf_stored` and the shared retry cron never
+      // auto-attaches it to the gateway.
       const finishEnrollment = async (resolvedMemberId: string | null) => {
         setMemberId(resolvedMemberId);
         setFinishingEnrollment(true);
         try {
-          await generateAndUploadPDF(resolvedMemberId, submissionId);
+          await generateAndUploadPDF(resolvedMemberId);
         } catch {
-          // Intentionally swallow: never block the success UI on a storage/gateway
-          // failure. The background cron completes any stuck gateway attach.
+          // Never block the success UI on a storage failure; the member is
+          // already enrolled and the PDF can be regenerated/downloaded later.
         }
         clearSubmissionId();
         setShowThankYou(true);
@@ -798,118 +803,101 @@ export default function EnrollmentWizard({ benefitId, onBenefitIdChange, agentId
       };
       const bodyString = JSON.stringify(enrollmentPayload);
 
-      const maxRetries = 3;
-      let attempt = 0;
+      // Fire exactly once — no auto-retry. A slow or failed call surfaces an
+      // error and the user retries manually. The form data and submissionId are
+      // preserved on failure, so a manual retry reuses the same submissionId and
+      // the idempotency gate guarantees the member is never created twice.
+      try {
+        const res = await fetch(apiUrl, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${supabaseKey}`,
+            'Content-Type': 'application/json',
+            'apikey': supabaseKey,
+            'Cache-Control': 'no-cache, no-store',
+            'X-Submission-Id': submissionId,
+          },
+          cache: 'no-store',
+          body: bodyString,
+        });
 
-      while (attempt < maxRetries) {
-        try {
-          const res = await fetch(apiUrl, {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${supabaseKey}`,
-              'Content-Type': 'application/json',
-              'apikey': supabaseKey,
-              'Cache-Control': 'no-cache, no-store',
-              'X-Submission-Id': submissionId,
-            },
-            cache: 'no-store',
-            body: bodyString,
+        // Parallel/duplicate submit guard: the member API was (or is being)
+        // called for this submission. Recover the member id and resume the
+        // PDF phase instead of re-POSTing (which would 409 again).
+        if (res.status === 409) {
+          const statusResult = await fetchSubmissionStatus(submissionId, agentParam);
+          if (statusResult.success && statusResult.memberId) {
+            await finishEnrollment(statusResult.memberId);
+            return;
+          }
+          setResponse({
+            success: false,
+            status: 409,
+            error: 'Enrollment already in progress',
+            message: 'Your enrollment is being processed. Please wait a moment before trying again.',
           });
+          setLoading(false);
+          return;
+        }
 
-          // Parallel/duplicate submit guard: the member API was (or is being)
-          // called for this submission. Recover the member id and resume the
-          // PDF/gateway phase instead of re-POSTing (which would 409 again).
-          if (res.status === 409) {
-            const statusResult = await fetchSubmissionStatus(submissionId, agentParam);
-            if (statusResult.success && statusResult.memberId) {
-              await finishEnrollment(statusResult.memberId);
-              return;
-            }
-            if (attempt < maxRetries - 1) {
-              attempt++;
-              const delay = Math.min(1000 * Math.pow(2, attempt), 5000);
-              await new Promise(resolve => setTimeout(resolve, delay));
-              continue;
-            }
-            setResponse({
-              success: false,
-              status: 409,
-              error: 'Enrollment already in progress',
-              message: 'Your enrollment is being processed. Please wait a moment before trying again.',
-            });
+        const contentType = res.headers.get('content-type');
+        if (!contentType || !contentType.includes('application/json')) {
+          const text = await res.text();
+          throw new Error(`Invalid response from server: ${text.substring(0, 100)}`);
+        }
+
+        const data = await res.json();
+
+        if (res.ok || res.status === 400) {
+          const transactionFailed =
+            data.data?.TRANSACTION?.SUCCESS === false ||
+            data.data?.TRANSACTION?.SUCCESS === "false";
+          const transactionSuccess =
+            !transactionFailed &&
+            (data.data?.TRANSACTION?.SUCCESS === true ||
+              data.data?.TRANSACTION?.SUCCESS === "true");
+          const hasSuccessFlag =
+            !transactionFailed &&
+            data.success === true &&
+            data.data?.SUCCESS === "true";
+
+          // An idempotent replay (member already created for this submission)
+          // is also a success — its data carries MEMBER.ID / TRANSACTION.SUCCESS.
+          const enrollmentSuccess =
+            (transactionSuccess || hasSuccessFlag || data.idempotentReplay === true) &&
+            !transactionFailed;
+
+          if (!enrollmentSuccess) {
+            setResponse(data);
+            clearFormDataOnly();
             setLoading(false);
             return;
           }
 
-          const contentType = res.headers.get('content-type');
-          if (!contentType || !contentType.includes('application/json')) {
-            const text = await res.text();
-            throw new Error(`Invalid response from server: ${text.substring(0, 100)}`);
-          }
-
-          const data = await res.json();
-
-          if (res.ok || res.status === 400) {
-            const transactionFailed =
-              data.data?.TRANSACTION?.SUCCESS === false ||
-              data.data?.TRANSACTION?.SUCCESS === "false";
-            const transactionSuccess =
-              !transactionFailed &&
-              (data.data?.TRANSACTION?.SUCCESS === true ||
-                data.data?.TRANSACTION?.SUCCESS === "true");
-            const hasSuccessFlag =
-              !transactionFailed &&
-              data.success === true &&
-              data.data?.SUCCESS === "true";
-
-            // An idempotent replay (member already created for this submission)
-            // is also a success — its data carries MEMBER.ID / TRANSACTION.SUCCESS.
-            const enrollmentSuccess =
-              (transactionSuccess || hasSuccessFlag || data.idempotentReplay === true) &&
-              !transactionFailed;
-
-            if (!enrollmentSuccess) {
-              setResponse(data);
-              clearFormDataOnly();
-              setLoading(false);
-              return;
-            }
-
-            const extractedMemberId = data.data?.MEMBER?.ID?.toString() || null;
-            await finishEnrollment(extractedMemberId);
-            return;
-          }
-
-          if (res.status >= 500 && attempt < maxRetries - 1) {
-            attempt++;
-            const delay = Math.min(1000 * Math.pow(2, attempt), 5000);
-            await new Promise(resolve => setTimeout(resolve, delay));
-            continue;
-          }
-
-          setResponse(data);
-          clearFormDataOnly();
-          setLoading(false);
-          return;
-
-        } catch (error) {
-          if (attempt < maxRetries - 1) {
-            attempt++;
-            const delay = Math.min(1000 * Math.pow(2, attempt), 5000);
-            await new Promise(resolve => setTimeout(resolve, delay));
-            continue;
-          }
-
-          setResponse({
-            success: false,
-            status: 500,
-            error: 'Network error',
-            message: error instanceof Error ? error.message : 'Failed to connect to enrollment API',
-          });
-          clearFormDataOnly();
-          setLoading(false);
+          const extractedMemberId = data.data?.MEMBER?.ID?.toString() || null;
+          await finishEnrollment(extractedMemberId);
           return;
         }
+
+        // Server error (5xx). Do NOT auto-retry and do NOT clear the form: the
+        // request may have already created the member, so the user retries
+        // manually with the same submissionId (idempotent, no duplicate).
+        setResponse(data);
+        setLoading(false);
+        return;
+
+      } catch (error) {
+        // Network/timeout error. The request may have reached the server, so we
+        // never auto-retry. Keep the form + submissionId so a manual retry is
+        // idempotent and can't create a duplicate member.
+        setResponse({
+          success: false,
+          status: 500,
+          error: 'Network error',
+          message: error instanceof Error ? error.message : 'Failed to connect to enrollment API',
+        });
+        setLoading(false);
+        return;
       }
     } finally {
       sessionStorage.removeItem('form_submitting');
@@ -1032,48 +1020,11 @@ export default function EnrollmentWizard({ benefitId, onBenefitIdChange, agentId
     }
   };
 
-  const sendPdfToGateway = async (memberId: string, pdfUrl: string, submissionId?: string) => {
-    try {
-      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-      const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
-      const gatewayApiUrl = `${supabaseUrl}/functions/v1/gateway-member-api-premiumhsa`;
-
-
-      const gatewayResponse = await fetch(gatewayApiUrl, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${supabaseKey}`,
-          'Content-Type': 'application/json',
-          'apikey': supabaseKey,
-          'Cache-Control': 'no-cache, no-store',
-        },
-        cache: 'no-store',
-        body: JSON.stringify({
-          memberId,
-          pdfUrl,
-          customerEmail: formData.email,
-          ...(submissionId ? { submissionId } : {}),
-        }),
-      });
-
-      const contentType = gatewayResponse.headers.get('content-type');
-      if (!contentType || !contentType.includes('application/json')) {
-        const text = await gatewayResponse.text();
-        throw new Error('Gateway API returned invalid response');
-      }
-
-      const gatewayResult = await gatewayResponse.json();
-
-      if (!gatewayResult.success) {
-        throw new Error(gatewayResult.message || gatewayResult.error || 'Gateway API call failed');
-      }
-
-    } catch (error) {
-      throw error;
-    }
-  };
-
-  const generateAndUploadPDF = async (enrollmentMemberId: string | null, submissionId?: string) => {
+  // NOTE: Automatic gateway attach (gateway-member-api-premiumhsa) has been
+  // removed on purpose. The PDF is uploaded to the 1Administration API manually
+  // to guarantee no duplicate enrollment. The PDF below is still generated and
+  // stored in Supabase storage so it can be downloaded for that manual upload.
+  const generateAndUploadPDF = async (enrollmentMemberId: string | null) => {
     try {
       const pdfBlob = await generateEnrollmentPDF(formData);
 
@@ -1085,9 +1036,6 @@ export default function EnrollmentWizard({ benefitId, onBenefitIdChange, agentId
       const formDataUpload = new FormData();
       formDataUpload.append('pdf', pdfBlob, 'enrollment.pdf');
       formDataUpload.append('email', formData.email);
-      if (submissionId) {
-        formDataUpload.append('submissionId', submissionId);
-      }
       formDataUpload.append('metadata', JSON.stringify({
         firstName: formData.firstName,
         lastName: formData.lastName,
@@ -1117,10 +1065,6 @@ export default function EnrollmentWizard({ benefitId, onBenefitIdChange, agentId
 
       if (pdfResult.success && pdfResult.pdfUrl) {
         setPdfUrl(pdfResult.pdfUrl);
-
-        if (enrollmentMemberId) {
-          await sendPdfToGateway(enrollmentMemberId, pdfResult.pdfUrl, submissionId);
-        }
       } else {
         throw new Error(pdfResult.error || 'PDF upload failed');
       }
