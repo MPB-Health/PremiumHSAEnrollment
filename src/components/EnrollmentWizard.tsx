@@ -18,7 +18,6 @@ import { isChildDependentUnder18ForContactOptional } from '../utils/dependentAge
 import {
   getOrCreateSubmissionId,
   clearSubmissionId,
-  fetchSubmissionStatus,
 } from '../utils/enrollmentSubmission';
 import ProgressIndicator from './ProgressIndicator';
 import Step1PersonalInfo from './Step1PersonalInfo';
@@ -718,30 +717,6 @@ export default function EnrollmentWizard({ benefitId, onBenefitIdChange, agentId
       const apiUrl = `${supabaseUrl}/functions/v1/enrollment-api-premiumhsa?id=${agentParam}`;
       const submissionId = getOrCreateSubmissionId();
 
-      // Generates the PDF and uploads it to Supabase storage once a member
-      // exists (shared by the normal success path and the 409 / idempotent-replay
-      // recovery path). The gateway attach is intentionally NOT done here — the
-      // PDF is uploaded to 1Administration manually to guarantee no duplicate
-      // enrollment. submissionId is deliberately NOT forwarded to the PDF upload
-      // so the row is never marked `pdf_stored` and the shared retry cron never
-      // auto-attaches it to the gateway.
-      const finishEnrollment = async (resolvedMemberId: string | null) => {
-        setMemberId(resolvedMemberId);
-        setFinishingEnrollment(true);
-        try {
-          await generateAndUploadPDF(resolvedMemberId);
-        } catch {
-          // Never block the success UI on a storage failure; the member is
-          // already enrolled and the PDF can be regenerated/downloaded later.
-        }
-        clearSubmissionId();
-        setShowThankYou(true);
-        clearStorage();
-        setFinishingEnrollment(false);
-        setLoading(false);
-        sendAdvisorNotification(agentParam).catch(() => {});
-      };
-
       const secureHsaProduct = formData.products.find(p => p.id === 'secure-hsa');
       const benefitIdToSend = secureHsaProduct?.extractedBenefitId || formData.benefitId;
       const priceToSend = secureHsaProduct?.extractedPrice || 0;
@@ -803,10 +778,28 @@ export default function EnrollmentWizard({ benefitId, onBenefitIdChange, agentId
       };
       const bodyString = JSON.stringify(enrollmentPayload);
 
-      // Fire exactly once — no auto-retry. A slow or failed call surfaces an
-      // error and the user retries manually. The form data and submissionId are
-      // preserved on failure, so a manual retry reuses the same submissionId and
-      // the idempotency gate guarantees the member is never created twice.
+      // Store the PDF BEFORE enrolling so it is always saved in Supabase storage,
+      // even when the enrollment POST later times out (504 from the slow
+      // 1Administration API). The agreement PDF is built from the form data, not
+      // from the member response, so it does not need the member id. This is
+      // best-effort — a storage failure must never block the enrollment. The
+      // submissionId is deliberately NOT passed (keeps the row off `pdf_stored`,
+      // so the shared retry cron never auto-attaches it to the gateway).
+      setFinishingEnrollment(true);
+      try {
+        await generateAndUploadPDF(null);
+      } catch {
+        // PDF is best-effort; never block the enrollment on a storage failure.
+      }
+      setFinishingEnrollment(false);
+
+      // Fire the enrollment POST exactly once — no auto-retry. Retrying a slow or
+      // timed-out enrollment is what creates duplicate members. A client-side
+      // timeout aborts the request near the edge function's wall-clock limit so
+      // the user gets a clear "still processing" message instead of hanging.
+      const ENROLL_TIMEOUT_MS = 150000;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), ENROLL_TIMEOUT_MS);
       try {
         const res = await fetch(apiUrl, {
           method: 'POST',
@@ -819,26 +812,9 @@ export default function EnrollmentWizard({ benefitId, onBenefitIdChange, agentId
           },
           cache: 'no-store',
           body: bodyString,
+          signal: controller.signal,
         });
-
-        // Parallel/duplicate submit guard: the member API was (or is being)
-        // called for this submission. Recover the member id and resume the
-        // PDF phase instead of re-POSTing (which would 409 again).
-        if (res.status === 409) {
-          const statusResult = await fetchSubmissionStatus(submissionId, agentParam);
-          if (statusResult.success && statusResult.memberId) {
-            await finishEnrollment(statusResult.memberId);
-            return;
-          }
-          setResponse({
-            success: false,
-            status: 409,
-            error: 'Enrollment already in progress',
-            message: 'Your enrollment is being processed. Please wait a moment before trying again.',
-          });
-          setLoading(false);
-          return;
-        }
+        clearTimeout(timeoutId);
 
         const contentType = res.headers.get('content-type');
         if (!contentType || !contentType.includes('application/json')) {
@@ -874,28 +850,37 @@ export default function EnrollmentWizard({ benefitId, onBenefitIdChange, agentId
             return;
           }
 
-          const extractedMemberId = data.data?.MEMBER?.ID?.toString() || null;
-          await finishEnrollment(extractedMemberId);
+          setMemberId(data.data?.MEMBER?.ID?.toString() || null);
+          clearSubmissionId();
+          setShowThankYou(true);
+          clearStorage();
+          setLoading(false);
+          sendAdvisorNotification(agentParam).catch(() => {});
           return;
         }
 
-        // Server error (5xx). Do NOT auto-retry and do NOT clear the form: the
-        // request may have already created the member, so the user retries
-        // manually with the same submissionId (idempotent, no duplicate).
+        // Other non-OK response (e.g. 5xx). The PDF is already stored. Surface
+        // the error; do NOT auto-retry (retrying a slow call creates duplicates).
         setResponse(data);
+        clearFormDataOnly();
         setLoading(false);
         return;
 
       } catch (error) {
-        // Network/timeout error. The request may have reached the server, so we
-        // never auto-retry. Keep the form + submissionId so a manual retry is
-        // idempotent and can't create a duplicate member.
+        clearTimeout(timeoutId);
+        // Timeout / network error: 1Administration may have already created the
+        // member even though we never got a response. The PDF is already stored
+        // above, so do NOT auto-retry — tell the user not to resubmit.
+        const isTimeout = error instanceof DOMException && error.name === 'AbortError';
         setResponse({
-          success: false,
-          status: 500,
-          error: 'Network error',
-          message: error instanceof Error ? error.message : 'Failed to connect to enrollment API',
+          success: true,
+          status: 202,
+          data: { TRANSACTION: { SUCCESS: true } },
+          message: isTimeout
+            ? 'Your enrollment is taking longer than usual and is still being processed. Please do NOT resubmit — our team will confirm your enrollment shortly.'
+            : 'Your enrollment is being processed. Please do NOT resubmit — if you do not receive a confirmation, our team will follow up shortly.',
         });
+        clearFormDataOnly();
         setLoading(false);
         return;
       }
