@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import EnrollmentWizard from './components/EnrollmentWizard';
 import PasswordEncryptionTool from './components/PasswordEncryptionTool';
+import ThankYouPage from './components/ThankYouPage';
 import DocumentPdfModal from './components/DocumentPdfModal';
 
 const PRIVACY_POLICY_PDF = `/assets/${encodeURIComponent('Sedera HealthShare Privacy Policy.pdf')}`;
@@ -81,6 +82,15 @@ function App() {
 
   if (currentPath === '/encrypt') {
     return <PasswordEncryptionTool />;
+  }
+
+  if (import.meta.env.DEV && currentPath === '/preview-listbill-thankyou') {
+    return (
+      <ThankYouPage
+        enrollmentData={{ firstName: 'Jane', email: 'jane.doe@example.com' }}
+        listBill={{ productName: 'Premium HSA' }}
+      />
+    );
   }
 
   return (

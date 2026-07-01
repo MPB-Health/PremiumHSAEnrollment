@@ -23,7 +23,7 @@ import ProgressIndicator from './ProgressIndicator';
 import Step1PersonalInfo from './Step1PersonalInfo';
 import Step2Questionnaire from './Step2Questionnaire';
 import Step2AddressInfo from './Step2AddressInfo';
-import ThankYouPage from './ThankYouPage';
+import ThankYouPage, { ListBillSummary } from './ThankYouPage';
 
 interface ApiResponse {
   success: boolean;
@@ -48,6 +48,7 @@ export default function EnrollmentWizard({ benefitId, onBenefitIdChange, agentId
   const [finishingEnrollment, setFinishingEnrollment] = useState(false);
   const [response, setResponse] = useState<ApiResponse | null>(null);
   const [showThankYou, setShowThankYou] = useState(false);
+  const [listBillSummary, setListBillSummary] = useState<ListBillSummary | null>(null);
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [memberId, setMemberId] = useState<string | null>(null);
   const [invalidDependentIndices, setInvalidDependentIndices] = useState<number[]>([]);
@@ -852,6 +853,15 @@ export default function EnrollmentWizard({ benefitId, onBenefitIdChange, agentId
 
           setMemberId(data.data?.MEMBER?.ID?.toString() || null);
           clearSubmissionId();
+
+          // Snapshot the List Bill decision into state BEFORE clearStorage()
+          // resets formData (which would flip paymentMethod back to the default).
+          if (formData.payment.paymentMethod === 'list-bill') {
+            setListBillSummary({ productName: 'Premium HSA' });
+          } else {
+            setListBillSummary(null);
+          }
+
           setShowThankYou(true);
           clearStorage();
           setLoading(false);
@@ -1059,7 +1069,7 @@ export default function EnrollmentWizard({ benefitId, onBenefitIdChange, agentId
   };
 
   if (showThankYou) {
-    return <ThankYouPage enrollmentData={{ firstName: formData.firstName, email: formData.email }} pdfUrl={pdfUrl} />;
+    return <ThankYouPage enrollmentData={{ firstName: formData.firstName, email: formData.email }} pdfUrl={pdfUrl} listBill={listBillSummary} />;
   }
 
   return (
