@@ -73,7 +73,9 @@ export default function Step2AddressInfo({
   };
 
   const pricingSummary = useMemo(() => {
-    const ONE_TIME_ENROLLMENT_FEE = 100;
+    // List Bill enrollments never carry a one-time enrollment fee.
+    const isListBill = formData.payment.paymentMethod === 'list-bill';
+    const ONE_TIME_ENROLLMENT_FEE = isListBill ? 0 : 100;
     const totalEnrollmentFee = formData.products.reduce((sum, p) => sum + (p.enrollmentFee || 0), 0);
     const totalAnnualFee = formData.products.reduce((sum, p) => sum + (p.annualFee || 0), 0);
 
@@ -108,7 +110,7 @@ export default function Step2AddressInfo({
       hasSmoker,
       smokerFee,
     };
-  }, [formData.products, formData.dob, formData.dependents, formData.appliedPromo, formData.smoker]);
+  }, [formData.products, formData.dob, formData.dependents, formData.appliedPromo, formData.smoker, formData.payment.paymentMethod]);
 
   const derivedSubscriberContactErrors = useMemo(() => {
     if (formData.dependents.length === 0) {
