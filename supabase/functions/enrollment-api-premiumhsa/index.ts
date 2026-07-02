@@ -791,6 +791,11 @@ Deno.serve(async (req: Request) => {
       }
     }
 
+    // List Bill enrollments never carry an enrollment fee.
+    if (requestData.payment.paymentType === 'LB') {
+      enrollmentFeeAmount = "0.00";
+    }
+
     const isPrimarySmoker = requestData.smoker.toLowerCase() === 'yes';
     const hasSmokerDependent = requestData.dependents.some(dep => dep.smoker.toLowerCase() === 'yes');
     const tobaccoFeeAmount = (isPrimarySmoker || hasSmokerDependent) ? TOBACCO_USE_MONTHLY_FEE : "0.00";
